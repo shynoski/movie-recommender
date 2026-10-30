@@ -6,12 +6,31 @@ N_FAVORITES = 5        # movies given to the model as the user's input
 MIN_RATINGS = 10       # movies need this many training ratings to be used
 SEED = 42
 
+from pathlib import Path
+import pandas as pd
+
 def load_data(data_dir=DATA_DIR):
-    ...
+    ratings = pd.read_csv(Path(data_dir) / "ratings.csv")
+    movies = pd.read_csv(Path(data_dir) / "movies.csv")
+    return ratings, movies
 
 def split_users(ratings, train_frac=0.8, val_frac=0.1, seed=SEED):
     """Split by USER so val/test users are never seen during training"""
-    ...
+    unique_users = ratings["userId"].unique()
+    shuffled_users = np.random.default_rng(seed).permutation(unique_users)
+
+    num_train = int(len(shuffled_users) * train_frac)
+    num_val = int(len(shuffled_users) * val_frac)
+
+    train_users = set(shuffled_users[:num_train])
+    val_users = set(shuffled_users[num_train:num_train + num_val])
+    test_users = set(shuffled_users[num_train + num_val:])
+
+    train_df = ratings[ratings["userId"].isin(train_users)]
+    val_df = ratings[ratings["userId"].isin(val_users)]
+    test_df = ratings[ratings["userId"].isin(test_users)]
+    
+    return train_df, val_df, test_df
 
 def popular_enough(train_ratings, min_ratings=MIN_RATINGS):
     """Movie IDs with enough training ratings to compute meaningful similarity."""
