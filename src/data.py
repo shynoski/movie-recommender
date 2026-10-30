@@ -15,14 +15,65 @@ def split_users(ratings, train_frac=0.8, val_frac=0.1, seed=SEED):
 
 def popular_enough(train_ratings, min_ratings=MIN_RATINGS):
     """Movie IDs with enough training ratings to compute meaningful similarity."""
-    ...
+
+    #count how many ratins each movie has in training data
+    movie_counts = train_ratings.groupby("movieId").size()
+
+    #get movies that have at least min_ratings=10 ratings
+    eligible_results = movie_counts[movie_counts >= min_ratings]
+
+    #return IDs of movies that meet thres.
+    return eligible_results.index
 
 def make_eval_cases(ratings, allowed_movies, n_favorites=N_FAVORITES, seed=SEED):
     """For each user: n_favorite liked movies as input, the other liked movies hidden.
     Returns a list of dicts: {"userID", "favourites": [movieID, ...], "hidden": {movieID, ...}}
     Users with too few liked movies are skipped.
     """
-    ...
+    #find movies where users rated 4.0 or higher
+    liked_movies = ratings[ratings["rating"] >= LIKE_THRESHOLD]
+
+    #Keep only movies with enough training ratings
+    liked_movies = liked_movies[
+        liked_movies["movieId"].isin(allowed_movies)
+    ]
+
+    #store evaluation cases for all eligible users
+    eval_cases = []
+
+    #group liked movies by user who rated them
+    grouped_users = liked_movies.groupby("userId")
+
+    #go through each user and their liked movies
+    for user_id, user_movies in grouped_users:
+        #skip users that don't have enough liekd movies
+        if len(user_movies) < n_favorites + 1:
+            continue
+
+        #randomly select 5 movies from this user's liked movies
+        selected_movies = user_movies.sample(n=n_favorites, random_state=seed)
+
+        #get movie IDs and convert them into a list
+        favorites = selected_movies["movieId"].tolist()
+
+        #keep movies that were NOT selected as favorites
+        remaining_movies = user_movies[
+            ~user_movies["movieId"].isin(favorites)
+        ]
+
+        #store remaining movie IDs in a set
+        hidden = set(remaining_movies["movieId"])
+
+        #store current user's evaluation info.
+        case = {
+            "userId": user_id,
+            "favorites": favorites,
+            "hidden": hidden
+        }
+
+        #Add this user's evaluation case to list
+        eval_cases.append(case)
+    return eval_cases
 
 if __name__ == "__main__":
     ratings, movies = load_data()
