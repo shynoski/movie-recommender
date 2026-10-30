@@ -1,13 +1,13 @@
 """Load MovieLens, split users, filter sparse movies, build evaluation cases."""
+from pathlib import Path
+import pandas as pd
+import numpy as np
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "ml-latest-small"
 LIKE_THRESHOLD = 4.0   # rating >= this counts as "liked" / relevant
 N_FAVORITES = 5        # movies given to the model as the user's input
 MIN_RATINGS = 10       # movies need this many training ratings to be used
 SEED = 42
-
-from pathlib import Path
-import pandas as pd
 
 def load_data(data_dir=DATA_DIR):
     ratings = pd.read_csv(Path(data_dir) / "ratings.csv")
