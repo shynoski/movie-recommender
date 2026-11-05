@@ -10,6 +10,10 @@ Run from the repo root:
 import argparse
 import numpy as np
 
+from src.baseline import PopularityRecommender, RandomReccommender
+from src.data import load_data, make_eval_cases, popular_enough, split_users
+from src.knn import ItemKNNRecommender
+
 def precision_at_k(recs, hidden, k=5):
     """Fraction of the k recommendations that are hidden liked movies."""
     ...
