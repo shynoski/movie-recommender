@@ -72,8 +72,17 @@ class ItemKNNRecommender:
         return recs
 
     def similar_movies(self, movie_id, n=10):
-        ...
-
+        """handy for sanity checks -- [(movieId, similarity), ...] for one movie"""
+        if movie_id not in self.movie_index:
+            return[]
+        distances, indices = self.nn.kneighbors(
+            self.matrix[self.movie_index[movie_id]], n_neighbors=min(n+1, len(self.movies_ids))
+        )
+        return [
+            (int(self.movie_ids[j]), round(1.0 - d, 3))
+            for d, j in zip(distances[0], indices[0])
+            if int(self.movie_ids[j]) != movie_id
+        ][:n]
 
 if __name__ == "__main__":
     from src.data import load_data, split_users, popular_enough
