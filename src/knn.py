@@ -23,7 +23,7 @@ class ItemKNNRecommender:
         self.center_ratings = center_ratings
 
     def fit(self, train_ratings, allowed_movies):
-        r = train_ratings[train_ratings["movieId"]]
+        r = train_ratings[train_ratings["movieId"].isin(allowed_movies)].copy()
 
         if self.center_ratings:
             r["rating"] = r["rating"] - r.groupby("userId")["rating"].transform("mean")
@@ -57,7 +57,7 @@ class ItemKNNRecommender:
             )
             for dist_row, idx_row in zip(distances, indicies):
                 for dist, j in zip(dist_row, idx_row):
-                    candidate = int(self.movies_ids[j])
+                    candidate = int(self.movie_ids[j])
                     if candidate not in favs:
                         scores[candidate] += 1.0 - dist # this is the cosine similarity btw
 
@@ -76,7 +76,7 @@ class ItemKNNRecommender:
         if movie_id not in self.movie_index:
             return[]
         distances, indices = self.nn.kneighbors(
-            self.matrix[self.movie_index[movie_id]], n_neighbors=min(n+1, len(self.movies_ids))
+            self.matrix[self.movie_index[movie_id]], n_neighbors=min(n+1, len(self.movie_ids))
         )
         return [
             (int(self.movie_ids[j]), round(1.0 - d, 3))
@@ -85,9 +85,18 @@ class ItemKNNRecommender:
         ][:n]
 
 if __name__ == "__main__":
-    from src.data import load_data, split_users, popular_enough
+    from data import load_data, split_users, popular_enough
 
     ratings, movies = load_data()
-    titles = movies.set_index("movieID")["title"]
+    titles = movies.set_index("movieId")["title"]
     train, _, _ = split_users(ratings)
     model = ItemKNNRecommender(n_neighbors=20).fit(train, popular_enough(train))
+
+    for movie_id in [79702, 66934, 152970]: # these are my favoirte movies! Scott Pilgrim vs the world, Dr horrible's sing along blog, and Hunt for the Wilderpeople
+        print(f"\nMost similar to {titles.get(movie_id, movie_id)}:")
+        for m, similar in model.similar_movies(movie_id, n=5):
+            print(f"    {similar:.3f}   {titles.get(m, m)}")
+
+        favs = [79702, 66934, 152970, 4993, 66097] # + LOTR and Coraline these are more of my favorite movies (＾▽＾)
+        print("\nFavorites:", [titles.get(m, m) for m in favs])
+        print("Recommendations:", [titles.get(m, m) for m in model.recommend(favs)])
