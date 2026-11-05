@@ -47,7 +47,29 @@ class ItemKNNRecommender:
         return self
 
     def recommend(self, favorites, k=5):
-        ...
+        favs = set(int(m) for m in favorites)
+        known = [self.movie_index[m] for m in favs if m in self.movie_index]
+
+        scores = defaultdict(float)
+        if known:
+            distances, indicies = self.nn.kneighbors(
+                self.matrix[known], n_neighbors=self.k_query
+            )
+            for dist_row, idx_row in zip(distances, indicies):
+                for dist, j in zip(dist_row, idx_row):
+                    candidate = int(self.movies_ids[j])
+                    if candidate not in favs:
+                        scores[candidate] += 1.0 - dist # this is the cosine similarity btw
+
+        recs = sorted(scores, key=scores.get, reverse=True)[:k]
+
+        # fill slots with popular movies if empty
+        for movie_id in self.fallback:
+            if len(recs) == k:
+                break
+            if movie_id not in favs and movie_id not in recs:
+                recs.append(movie_id)
+        return recs
 
     def similar_movies(self, movie_id, n=10):
         ...
