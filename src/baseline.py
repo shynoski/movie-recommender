@@ -26,7 +26,7 @@ class PopularityRecommender:
         favs = set(favorites)
         recs = []
         for movie_id in self.ranked:
-            if movie_id not in self.ranked:
+            if movie_id not in favs:
                 recs.append(movie_id)
                 if len(recs) == k:
                     break
