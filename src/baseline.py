@@ -8,7 +8,7 @@ Every recommender shares the same interface so evaluate.py can treat them alike:
 
 import numpy as np
 
-from src.data import LIKE_THRESHOLD, SEED
+from data import LIKE_THRESHOLD, SEED
 
 class PopularityRecommender:
     """Recommends the moveis liked by the most training users, same list for everyone. """
