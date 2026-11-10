@@ -5,18 +5,14 @@ validation user's 5 favorites with several seeds, and reports:
   1. mean +/- std of Precision@5 and Recall@5 across seeds
   2. a bootstrap 95% CI (resampling users) for each KNN model's relative
      Recall@5 improvement over popularity
-
-Run: python src/robustness.py
 """
 import numpy as np
 
 from baseline import PopularityRecommender
 from data import load_data, make_eval_cases, popular_enough, split_users
-from evaluate import precision_at_k, recall_at_k
-from knn import ItemKNNRecommender
+from evaluate import REFERENCE, knn_variants, precision_at_k, recall_at_k
 
 SEEDS = range(10)
-K_VALUES = [10, 20, 50, 100]
 N_BOOTSTRAP = 2000
 
 
@@ -30,49 +26,64 @@ def per_user_scores(model, cases, k=5):
     return np.array(p), np.array(r)
 
 
+def relative_ci(model_scores, base_scores, idx):
+    """Point estimate and 95% CI of mean(model) / mean(base) - 1 over bootstrap samples idx."""
+    point = model_scores.mean() / base_scores.mean() - 1
+    rel = model_scores[idx].mean(axis=1) / base_scores[idx].mean(axis=1) - 1
+    lo, hi = np.percentile(rel, [2.5, 97.5])
+    return point, lo, hi
+
+
+def fmt(point, lo, hi):
+    mark = "*" if lo > 0 or hi < 0 else " "  # * = CI excludes zero
+    return f"{point:>+7.1%} [{lo:+.1%}, {hi:+.1%}]{mark}"
+
+
 def main():
     ratings, _ = load_data()
     train, val, _ = split_users(ratings)
     allowed = popular_enough(train)
 
-    models = {"Popularity": PopularityRecommender()}
-    for n in K_VALUES:
-        models[f"ItemKNN K={n}"] = ItemKNNRecommender(n_neighbors=n)
+    models = {"Popularity": PopularityRecommender(), **knn_variants()}
     for model in models.values():
         model.fit(train, allowed)
+
+    seed_cases = [make_eval_cases(val, allowed, seed=seed) for seed in SEEDS]
 
     # results[name] = (precision array, recall array), each shaped (n_seeds, n_users)
     results = {}
     for name, model in models.items():
-        ps, rs = [], []
-        for seed in SEEDS:
-            cases = make_eval_cases(val, allowed, seed=seed)
-            p, r = per_user_scores(model, cases)
-            ps.append(p)
-            rs.append(r)
+        ps, rs = zip(*(per_user_scores(model, cases) for cases in seed_cases))
         results[name] = (np.array(ps), np.array(rs))
 
     n_users = results["Popularity"][1].shape[1]
     print(f"VALIDATION: {n_users} users, {len(SEEDS)} seeds\n")
-    print(f"{'Model':<18}{'Precision@5':>18}{'Recall@5':>20}")
-    print("-" * 56)
+    print(f"{'Model':<30}{'Precision@5':>18}{'Recall@5':>20}")
+    print("-" * 68)
     for name, (p, r) in results.items():
         pm, rm = p.mean(axis=1), r.mean(axis=1)  # one mean per seed
-        print(f"{name:<18}{pm.mean():>10.4f} ± {pm.std():.4f}{rm.mean():>12.4f} ± {rm.std():.4f}")
+        print(f"{name:<30}{pm.mean():>10.4f} ± {pm.std():.4f}{rm.mean():>12.4f} ± {rm.std():.4f}")
 
-    # Bootstrap: resample users (each user's recall averaged over seeds)
+    # Bootstrap: resample users (each user's score averaged over seeds).
+    # The same resampled users are used for every comparison, which is what makes it paired.
     rng = np.random.default_rng(0)
-    pop_r = results["Popularity"][1].mean(axis=0)
     idx = rng.integers(0, n_users, size=(N_BOOTSTRAP, n_users))
-    print(f"\nRelative Recall@5 improvement over popularity (95% bootstrap CI):")
-    for name, (_, r) in results.items():
-        if name == "Popularity":
+    user_p = {name: p.mean(axis=0) for name, (p, _) in results.items()}
+    user_r = {name: r.mean(axis=0) for name, (_, r) in results.items()}
+
+    print("\nRelative Recall@5 improvement over popularity (95% bootstrap CI):")
+    for name in results:
+        if name != "Popularity":
+            print(f"  {name:<30}{fmt(*relative_ci(user_r[name], user_r['Popularity'], idx))}")
+
+    print(f"\nPaired comparison vs {REFERENCE} (95% bootstrap CI, * = CI excludes 0):")
+    print(f"  {'Model':<30}{'Precision@5':>26}{'Recall@5':>28}")
+    for name in results:
+        if name in ("Popularity", REFERENCE):
             continue
-        knn_r = r.mean(axis=0)
-        point = knn_r.mean() / pop_r.mean() - 1
-        rel = knn_r[idx].mean(axis=1) / pop_r[idx].mean(axis=1) - 1
-        lo, hi = np.percentile(rel, [2.5, 97.5])
-        print(f"  {name:<16}{point:>+8.1%}   [{lo:+.1%}, {hi:+.1%}]")
+        p_ci = relative_ci(user_p[name], user_p[REFERENCE], idx)
+        r_ci = relative_ci(user_r[name], user_r[REFERENCE], idx)
+        print(f"  {name:<30}{fmt(*p_ci):>28}{fmt(*r_ci):>28}")
 
 
 if __name__ == "__main__":
