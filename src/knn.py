@@ -18,6 +18,12 @@ from data import LIKE_THRESHOLD, load_genome
 TABLE_NEIGHBORS = 100      # neighbors stored per movie; any K up to this reuses one table
 BATCH_CELLS = 20_000_000   # similarity scores held in memory at once (~80 MB of float32)
  
+# How much a user's LOVE and LIKE picks count when scoring candidates. SEEN picks add
+# nothing: they are only kept out of the results (as are LOVE and LIKE picks).
+# These only change how recommend() combines the user's picks, never the fit.
+TIER_WEIGHTS = {"love": 2.0, "like": 1.0}
+TIERS = ("love", "like", "seen")
+
 _TABLE_CACHE = {}
 _CONTENT_CACHE = {}
  
@@ -182,48 +188,87 @@ class ItemKNNRecommender:
             "popularity": log_likes / max(log_likes.max(), 1e-12),
         }
  
-    def _knn_scores(self, known, nbr_idx=None, nbr_sim=None):
-        """(candidate row indices, summed similarity) for a user's known favorites.
+    def _knn_scores(self, rows, weights, exclude, nbr_idx=None, nbr_sim=None):
+        """(candidate row indices, score) from the neighbors of the user's LOVE/LIKE picks.
+        Each neighbor's similarity is multiplied by its pick's tier weight, then summed per
+        candidate. Candidates in `exclude` (every pick, including SEEN) are dropped.
         Uses the ratings table unless another neighbor table is passed in."""
         nbr_idx = self.nbr_idx if nbr_idx is None else nbr_idx
         nbr_sim = self.nbr_sim if nbr_sim is None else nbr_sim
         k_nb = min(self.n_neighbors, nbr_idx.shape[1])
-        cand = nbr_idx[known, :k_nb].ravel()
-        sims = nbr_sim[known, :k_nb].ravel()
+        cand = nbr_idx[rows, :k_nb].ravel()
+        sims = nbr_sim[rows, :k_nb].ravel()
+        w = np.repeat(weights, k_nb)  # each pick's weight, once per neighbor
         keep = sims > 0  # zero/negative similarity is not evidence of a match
-        cand, sims = cand[keep], sims[keep].astype(np.float64)
+        cand, sims, w = cand[keep], sims[keep].astype(np.float64), w[keep]
         if self.sim_power != 1.0:
             sims = sims ** self.sim_power
+        sims = sims * w  # after sim_power, so LOVE's weight isn't squared too
         cand, inverse = np.unique(cand, return_inverse=True)
         scores = np.bincount(inverse, weights=sims, minlength=len(cand))
-        not_fav = ~np.isin(cand, known)
-        return cand[not_fav], scores[not_fav]
- 
-    def recommend(self, favorites, k=5):
-        favs = set(int(m) for m in favorites)
-        known = np.array([self.movie_index[m] for m in favs if m in self.movie_index], dtype=np.int64)
-        cand, scores = self._knn_scores(known) if known.size else (np.array([], int), np.array([]))
- 
+        keep = ~np.isin(cand, exclude)
+        return cand[keep], scores[keep]
+
+    @staticmethod
+    def _parse_picks(picks):
+        """{movieId: tier}. A plain list of movieIds (the original interface) means all "like"."""
+        if isinstance(picks, dict):
+            sel = {int(m): str(t).lower() for m, t in picks.items()}
+        else:
+            sel = {int(m): "like" for m in picks}
+        bad = set(sel.values()) - set(TIERS)
+        if bad:
+            raise ValueError(f"unknown tier(s) {sorted(bad)}; use {TIERS}")
+        return sel
+
+    def recommend(self, picks, k=5):
+        """picks: {movieId: "love" | "like" | "seen"}, or a plain list of movieIds (all "like").
+        Returns k movieIds, best first. No pick of any tier is ever recommended.
+        A plain list gives exactly the same results as before tiers existed."""
+        return [m for m, _ in self.recommend_with_scores(picks, k)]
+
+    def recommend_with_scores(self, picks, k=5):
+        """Like recommend(), but returns [(movieId, score), ...]. Higher score = more confident.
+        The score is the tier-weighted sum of similarities to the user's LOVE/LIKE picks
+        (after the blend steps when those are on). Popular-movie fill-ins score 0."""
+        sel = self._parse_picks(picks)
+        favs = set(sel)
+        exclude = np.array([self.movie_index[m] for m in sel if m in self.movie_index], dtype=np.int64)
+        scored = [(self.movie_index[m], TIER_WEIGHTS[t]) for m, t in sel.items()
+                  if t in TIER_WEIGHTS and m in self.movie_index]
+        rows = np.array([i for i, _ in scored], dtype=np.int64)
+        weights = np.array([w for _, w in scored], dtype=np.float64)
+        if rows.size:
+            cand, scores = self._knn_scores(rows, weights, exclude)
+        else:
+            cand, scores = np.array([], int), np.array([])
+
         if self.pop_weight > 0 or self.pop_penalty > 0 or self.content_weight > 0:
-            return self._recommend_blended(known, cand, scores, favs, k)
- 
-        best = np.argsort(-scores, kind="stable")[:k]
-        recs = [int(self.movie_ids[j]) for j in cand[best]]
-        # fill any empty slots with popular movies
+            total = self._blended_scores(rows, weights, exclude, cand, scores)
+            best = np.argsort(-total, kind="stable")[:k]
+            recs = [(int(self.movie_ids[j]), float(total[j])) for j in best if total[j] > 0]
+        else:
+            best = np.argsort(-scores, kind="stable")[:k]
+            recs = [(int(self.movie_ids[cand[j]]), float(scores[j])) for j in best]
+
+        # fill any empty slots with popular movies the user hasn't picked
+        chosen = {m for m, _ in recs}
         for movie_id in self.fallback:
             if len(recs) == k:
                 break
-            if movie_id not in favs and movie_id not in recs:
-                recs.append(movie_id)
+            if movie_id not in favs and movie_id not in chosen:
+                recs.append((movie_id, 0.0))
+                chosen.add(movie_id)
         return recs
- 
-    def _recommend_blended(self, known, cand, scores, favs, k):
+
+    def _blended_scores(self, rows, weights, exclude, cand, scores):
         """Score every movie: ratings/content blend -> popularity penalty -> popularity blend."""
         total = np.zeros(len(self.movie_ids))
         if scores.size:
             total[cand] = (1 - self.content_weight) * scores / scores.max()
-        if self.content_weight > 0 and known.size:
-            c_cand, c_scores = self._knn_scores(known, self.content_idx, self.content_sim)
+        if self.content_weight > 0 and rows.size:
+            c_cand, c_scores = self._knn_scores(rows, weights, exclude,
+                                                self.content_idx, self.content_sim)
             if c_scores.size:
                 total[c_cand] += self.content_weight * c_scores / c_scores.max()
         if self.pop_penalty > 0:
@@ -232,17 +277,9 @@ class ItemKNNRecommender:
             if total.max() > 0:
                 total /= total.max()
             total = (1 - self.pop_weight) * total + self.pop_weight * self.popularity
- 
-        total[known] = -np.inf
-        best = np.argsort(-total, kind="stable")[:k]
-        recs = [int(self.movie_ids[j]) for j in best if total[j] > 0]
-        for movie_id in self.fallback:  # only needed if a user has almost no neighbors
-            if len(recs) == k:
-                break
-            if movie_id not in favs and movie_id not in recs:
-                recs.append(movie_id)
-        return recs
- 
+        total[exclude] = -np.inf
+        return total
+
     def similar_movies(self, movie_id, n=10, by="ratings"):
         """Handy for sanity checks -- [(movieId, similarity), ...] for one movie (n <= 100).
         by="content" uses the tag-genome table (needs content_weight > 0)."""
@@ -280,43 +317,44 @@ if __name__ == "__main__":
     counts = train.groupby("movieId").size()
  
     # Look movies up by title: movieIds aren't the same across every MovieLens release.
-    saschas_favorites = [
-        "Scott Pilgrim vs. the World (2010)",
-        "Dr. Horrible's Sing-Along Blog (2008)",
-        "Hunt for the Wilderpeople (2016)",
-        "Lord of the Rings: The Fellowship of the Ring, The (2001)",
-        "Coraline (2009)",
-    ]
+    saschas_picks = {
+        "Coraline (2009)": "love",
+        "Scott Pilgrim vs. the World (2010)": "love",
+        "Lord of the Rings: The Fellowship of the Ring, The (2001)": "like",
+        "Dr. Horrible's Sing-Along Blog (2008)": "like",
+        "Kick-Ass (2010)": "seen",
+    }
     # ml-1m stops at 2000, so fall back to classics it does have
-    classics = [
-        "Toy Story (1995)",
-        "Princess Bride, The (1987)",
-        "Matrix, The (1999)",
-        "Back to the Future (1985)",
-        "Groundhog Day (1993)",
-    ]
- 
-    favs = []
-    for title in saschas_favorites:
+    classics = {
+        "Toy Story (1995)": "love",
+        "Princess Bride, The (1987)": "love",
+        "Matrix, The (1999)": "love",
+        "Back to the Future (1985)": "like",
+        "Groundhog Day (1993)": "seen",
+    }
+
+    picks = {}
+    for title, tier in saschas_picks.items():
         movie_id = title_to_id.get(title)
         if movie_id is None:
             print(f"(not in {DATASET}: {title})")
         elif movie_id not in model.movie_index:
             print(f"(fewer than {MIN_RATINGS} training ratings: {title})")
         else:
-            favs.append(movie_id)
+            picks[movie_id] = tier
             if has_genome and movie_id not in load_genome()[0]:
                 print(f"(no tag-genome scores, ratings only: {title})")
-    if len(favs) < 3:
-        print("Too few of those favorites are usable here, using classics instead.")
-        favs = [title_to_id[t] for t in classics if t in title_to_id]
- 
+    if sum(t != "seen" for t in picks.values()) < 3:
+        print("Too few of those picks are usable here, using classics instead.")
+        picks = {title_to_id[t]: tier for t, tier in classics.items() if t in title_to_id}
+    favs = [m for m, t in picks.items() if t != "seen"]
+
     def label(m):
         return f"{titles.get(m, m)}  [{counts.get(m, 0):,} ratings]"
  
-    print("\nFavorites:")
-    for m in favs:
-        print("   ", label(m))
+    print("\nPicks:")
+    for m, tier in picks.items():
+        print(f"    {tier.upper():<5} {label(m)}")
  
     for movie_id in favs[:3]:
         print(f"\nMost similar to {titles[movie_id]}:")
@@ -330,5 +368,5 @@ if __name__ == "__main__":
  
     for name, v in variants.items():
         print(f"\nRecommendations, {name}:")
-        for m in v.recommend(favs):
-            print("   ", label(m))
+        for m, score in v.recommend_with_scores(picks):
+            print(f"    {score:6.3f}   {label(m)}")
